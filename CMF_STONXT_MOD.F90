@@ -1,0 +1,139 @@
+MODULE CMF_STONXT_MOD
+!==========================================================
+!* PURPOSE: calculate the storage in the next time step in FTCS diff. eq.
+!
+! (C) D.Yamazaki & E. Dutra  (U-Tokyo/FCUL)  Aug 2019
+!
+! Licensed under the Apache License, Version 2.0 (the "License");
+!   You may not use this file except in compliance with the License.
+!   You may obtain a copy of the License at: http://www.apache.org/licenses/LICENSE-2.0
+!
+! Unless required by applicable law or agreed to in writing, software distributed under the License is 
+!  distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. 
+! See the License for the specific language governing permissions and limitations under the License.
+!==========================================================
+USE CMF_NMLIST_MOD,          ONLY: CMF_FILES, CMF_OPTIONS, CMF_CONFIG, CMF_PARAMS
+USE CMF_NMLIST_MOD,          ONLY: CMF_TIME, CMF_MAPS, CMF_FORCING, CMF_BOUNDARY
+USE CMF_NMLIST_MOD,          ONLY: CMF_RESTART, CMF_DAM, CMF_LEVEE, CMF_OUTPUT,CMF_TRACER,CMF_SED 
+CONTAINS
+!####################################################################
+! -- CMF_CALC_STONXT
+!
+!####################################################################
+SUBROUTINE CMF_CALC_STONXT
+USE PARKIND1,           ONLY: JPIM, JPRB, JPRD
+
+USE CMF_VARS_MOD,        ONLY: NSEQALL
+USE CMF_VARS_MOD,       ONLY: D2RIVOUT,  D2FLDOUT,  P2RIVSTO,  P2FLDSTO,  D2RUNOFF
+USE CMF_VARS_MOD,       ONLY: P2GDWSTO,  D2GDWRTN,  D2ROFSUB,  D2WEVAP
+USE CMF_VARS_MOD,       ONLY: D2RIVINF,  D2FLDINF,  D2PTHOUT,  D2FLDFRC, &
+                            & D2OUTFLW,  D2STORGE,  D2WEVAPEX
+USE CMF_VARS_MOD,       ONLY: P0GLBSTOPRE,P0GLBSTONXT,P0GLBSTONEW,P0GLBRIVINF,P0GLBRIVOUT
+IMPLICIT NONE
+! Save for OpenMP
+INTEGER(KIND=JPIM),SAVE    ::  ISEQ
+REAL(KIND=JPRB),SAVE       ::  DRIVROF, DFLDROF, DWEVAPEX
+!$OMP THREADPRIVATE           (DRIVROF, DFLDROF, DWEVAPEX)
+!================================================
+IF (CMF_OPTIONS%LGDWDLY ) THEN
+  CALL CALC_GDWDLY
+ELSE
+  ! No ground water delay 
+!$OMP PARALLEL DO
+  DO ISEQ=1,NSEQALL
+    D2GDWRTN(ISEQ,1) = D2ROFSUB(ISEQ,1)
+    P2GDWSTO(ISEQ,1) = 0._JPRD
+  ENDDO
+!$OMP END PARALLEL DO
+ENDIF
+!!==============================
+P0GLBSTOPRE=0._JPRD
+P0GLBSTONXT=0._JPRD
+P0GLBSTONEW=0._JPRD
+P0GLBRIVINF=0._JPRD
+P0GLBRIVOUT=0._JPRD
+
+!$OMP PARALLEL DO REDUCTION(+:P0GLBSTOPRE,P0GLBRIVINF,P0GLBRIVOUT,P0GLBSTONXT,P0GLBSTONEW)
+DO ISEQ=1, NSEQALL
+
+  P0GLBSTOPRE = P0GLBSTOPRE + P2RIVSTO(ISEQ,1)    + P2FLDSTO(ISEQ,1)
+!!  P0GLBRIVINF = P0GLBRIVINF + D2RIVINF(ISEQ,1)*CMF_CONFIG%CMF_CONFIG%DT + D2FLDINF(ISEQ,1)*CMF_CONFIG%CMF_CONFIG%DT + D2PTHINF(ISEQ,1)*CMF_CONFIG%CMF_CONFIG%DT  !! pthinf not used v4.3
+  P0GLBRIVINF = P0GLBRIVINF + D2RIVINF(ISEQ,1)*CMF_CONFIG%DT + D2FLDINF(ISEQ,1)*CMF_CONFIG%DT
+  P0GLBRIVOUT = P0GLBRIVOUT + D2RIVOUT(ISEQ,1)*CMF_CONFIG%DT + D2FLDOUT(ISEQ,1)*CMF_CONFIG%DT + D2PTHOUT(ISEQ,1)*CMF_CONFIG%DT
+
+  P2RIVSTO(ISEQ,1) = P2RIVSTO(ISEQ,1) + D2RIVINF(ISEQ,1)*CMF_CONFIG%DT - D2RIVOUT(ISEQ,1)*CMF_CONFIG%DT
+  IF ( P2RIVSTO(ISEQ,1) < 0._JPRD ) THEN
+    P2FLDSTO(ISEQ,1) = P2FLDSTO(ISEQ,1) + P2RIVSTO(ISEQ,1)
+    P2RIVSTO(ISEQ,1) = 0._JPRD
+  ENDIF
+
+  P2FLDSTO(ISEQ,1) = P2FLDSTO(ISEQ,1) + D2FLDINF(ISEQ,1)*CMF_CONFIG%DT - D2FLDOUT(ISEQ,1)*CMF_CONFIG%DT &
+                                      - D2PTHOUT(ISEQ,1)*CMF_CONFIG%DT
+!!                                      + D2PTHINF(ISEQ,1)*CMF_CONFIG%DT - D2PTHOUT(ISEQ,1)*CMF_CONFIG%DT  !! pthinf not used v4.3
+  IF( P2FLDSTO(ISEQ,1) < 0._JPRD )THEN
+    P2RIVSTO(ISEQ,1)=MAX( P2RIVSTO(ISEQ,1)+P2FLDSTO(ISEQ,1), 0._JPRD )
+    P2FLDSTO(ISEQ,1)=0._JPRD
+  ENDIF
+
+  P0GLBSTONXT = P0GLBSTONXT + P2RIVSTO(ISEQ,1) + P2FLDSTO(ISEQ,1)
+  D2OUTFLW(ISEQ,1)=D2RIVOUT(ISEQ,1)+D2FLDOUT(ISEQ,1)
+!!  D2OUTFLW(ISEQ,1)=D2RIVOUT(ISEQ,1)+D2FLDOUT(ISEQ,1)+D2PTHOUT(ISEQ,1)   !! bug before v4.2 (pthout shoudl not be added)
+
+  DRIVROF = ( D2RUNOFF(ISEQ,1)+D2GDWRTN(ISEQ,1) ) * ( 1._JPRB-D2FLDFRC(ISEQ,1) ) * CMF_CONFIG%DT
+  DFLDROF = ( D2RUNOFF(ISEQ,1)+D2GDWRTN(ISEQ,1) ) *           D2FLDFRC(ISEQ,1)   * CMF_CONFIG%DT
+  P2RIVSTO(ISEQ,1) = P2RIVSTO(ISEQ,1) + DRIVROF
+  P2FLDSTO(ISEQ,1) = P2FLDSTO(ISEQ,1) + DFLDROF
+
+  IF (CMF_OPTIONS%LWEVAP ) THEN
+    !! Find out amount of water to be extracted from flooplain reservoir
+    !! Assuming "potential water evaporation", multiplied by flood area fraction
+    !! Limited by total amount of flooplain storage 
+    DWEVAPEX = MIN(P2FLDSTO(ISEQ,1),D2FLDFRC(ISEQ,1)*CMF_CONFIG%DT*D2WEVAP(ISEQ,1)*1._JPRD)
+    P2FLDSTO(ISEQ,1) = P2FLDSTO(ISEQ,1) - DWEVAPEX 
+    D2WEVAPEX(ISEQ,1) = DWEVAPEX/CMF_CONFIG%DT ! keept for output as flux 
+  ENDIF 
+
+  D2STORGE(ISEQ,1)=P2RIVSTO(ISEQ,1)+P2FLDSTO(ISEQ,1)
+  P0GLBSTONEW=P0GLBSTONEW+D2STORGE(ISEQ,1)
+
+END DO
+!$OMP END PARALLEL DO
+CONTAINS
+!==========================================================
+!+ CALC_GDWDLY
+!+ 
+!+ 
+!==========================================================
+SUBROUTINE CALC_GDWDLY
+USE CMF_VARS_MOD,        ONLY: NSEQALL,D2GDWDLY
+IMPLICIT NONE
+!*** LOCAL
+REAL(KIND=JPRB)            ::  ZDTI
+! SAVE for OpenMP
+INTEGER(KIND=JPIM),SAVE    ::  ISEQ
+REAL(KIND=JPRB),SAVE       ::  ZMULGW
+!$OMP THREADPRIVATE           (ZMULGW)
+!=====================================================
+ZDTI = 1._JPRB / CMF_CONFIG%DT ! Inverse time-step 
+!$OMP PARALLEL DO
+DO ISEQ=1,NSEQALL
+  IF (D2GDWDLY(ISEQ,1)>0._JPRB) THEN 
+    ! Only if GW delay > 0 
+    ZMULGW = 1._JPRB / ( ZDTI + 1._JPRB/D2GDWDLY(ISEQ,1) ) 
+    P2GDWSTO(ISEQ,1) = ( D2ROFSUB(ISEQ,1) + P2GDWSTO(ISEQ,1)*ZDTI ) *ZMULGW
+    D2GDWRTN(ISEQ,1) = P2GDWSTO(ISEQ,1) / D2GDWDLY(ISEQ,1)
+  ELSE
+    ! Zero GW delay 
+    P2GDWSTO(ISEQ,1) = 0._JPRD
+    D2GDWRTN(ISEQ,1) = D2ROFSUB(ISEQ,1)
+  ENDIF
+ENDDO
+!$OMP END PARALLEL DO
+
+END SUBROUTINE CALC_GDWDLY
+!==========================================================
+
+END SUBROUTINE CMF_CALC_STONXT
+!####################################################################
+
+END MODULE CMF_STONXT_MOD
